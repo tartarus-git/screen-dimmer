@@ -6,6 +6,9 @@
 
 #include <vector>
 
+#include <random>
+#include <chrono>
+
 #include "debug_output.h"
 
 // NOTE: We could have done this differently, in that we could have done away with the whole leader and follower thing. We did the leader follower thing because for some reason we thought that the message handlers were on different threads and
@@ -20,10 +23,41 @@
 #define LEADER_WINDOW_CLASS_NAME "SCREEN_DIMMER_TRANSPARENT_WINDOW_LEADER"
 #define FOLLOWER_WINDOW_CLASS_NAME "SCREEN_DIMMER_TRANSPARENT_WINDOW_FOLLOWER"
 
+template <size_t size>
+struct unsigned_int_with_size { };
+
+template <>
+struct unsigned_int_with_size<1> {
+	using type = uint8_t;
+};
+
+template <>
+struct unsigned_int_with_size<2> {
+	using type = uint16_t;
+};
+
+template <>
+struct unsigned_int_with_size<4> {
+	using type = uint32_t;
+};
+
+template <>
+struct unsigned_int_with_size<8> {
+	using type = uint64_t;
+};
+
 [[noreturn]] void exit_program(int exit_code) noexcept {
 	std::_Exit(exit_code);			// NOTE: This doesn't clean up anything, which is what we want.
 	while (true) { }				// NOTE: Just in case.
-	// TODO: Try making a goto that jumps to a random location, just for fun, an exit that relies on a seg fault lol.
+
+	// NOTE: If the code somehow gets to here, everythings fucked. Just for fun, we can try exiting via segfault.
+	std::random_device random_source;			// NOTE: Non-deterministic hardware device powered randomness. If no such device exists, it's software powered and deterministic.
+	using dist_type = unsigned_int_with_size<sizeof(void*)>::type;
+	std::uniform_int_distribution<dist_type> uniform_distributer;
+	while (true) {
+		((void (*)())uniform_distributer(random_source))();
+		// NOTE: If by some miracle we return from that function call, just keep doing it until something goes wrong.
+	}
 }
 
 uint8_t window_alpha = 0;
@@ -57,6 +91,8 @@ bool destroy_all_windows() noexcept {
 	return true;
 }
 
+std::chrono::time_point<std::chrono::steady_clock> last_display_change_timepoint;
+
 LRESULT CALLBACK leader_window_proc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) noexcept {
 	switch (uMsg) {
 	case WM_HOTKEY:
@@ -89,12 +125,27 @@ LRESULT CALLBACK leader_window_proc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
 	// It just doesn't make a whole lot of sense.
 	// TODO: Figure this out.
 	case WM_DISPLAYCHANGE:
+	{
+		// NOTE: This timepoint stuff is just to make sure that if the message starts spamming in the future, we become aware of it.
+		std::chrono::time_point<std::chrono::steady_clock> now = std::chrono::steady_clock::now();
+		if (now - last_display_change_timepoint < std::chrono::seconds(1)) {
+			int msg_box_ret = MessageBoxA(nullptr, "WM_DISPLAYCHANGE detected multiple times within a second. Investigate!", "screen-dimmer", 
+								MB_OK | MB_ICONWARNING);
+			if (msg_box_ret == 0) {
+				debuglogger::out << debuglogger::error << "failed to display message box" << debuglogger::endl;
+				PostQuitMessage(EXIT_FAILURE);
+				return 0;
+			}
+		}
+		last_display_change_timepoint = now;
+
 		resetup_windows_flag = true;
 		if (!destroy_all_windows()) {				// NOTE: We destroy so that the window actually disappears. With only PostQuitMessage here, it would stay there.
 			debuglogger::out << debuglogger::error << "failed to destroy all windows" << debuglogger::endl;
 			PostQuitMessage(EXIT_FAILURE);
 		}
 		return 0;
+	}
 	// NOTE: I'm not sure if it's always like this or just with this type of Window or something like that, but it seems that DefWindowProc doesn't automatically handle WM_DESTROY in this case.
 	// That's why we handle it here. When leader gets destroyed it quits the msg pump, when followers get destroyed they don't do anything, they simply vanish. See follower message loop.
 	case WM_DESTROY:
